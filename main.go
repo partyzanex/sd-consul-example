@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,40 +13,26 @@ import (
 
 	capi "github.com/hashicorp/consul/api"
 	"github.com/pkg/errors"
-	"github.com/urfave/cli/v2"
 	"golang.org/x/sync/errgroup"
 )
 
-const (
-	nameFlag      = "name"
-	idFlag        = "id"
-	hostFlag      = "host"
-	portFlag      = "port"
-	checkHostFlag = "check-host"
+var (
+	name      = flag.String("name", "example", "service name")
+	id        = flag.String("id", "example-id", "service id")
+	host      = flag.String("host", "0.0.0.0", "HTTP service hostname")
+	port      = flag.Int("port", 8000, "HTTP service port")
+	checkHost = flag.String("check-host", "host.docker.internal", "internal hostname for service checks")
 )
 
-func flags() []cli.Flag {
-	return []cli.Flag{
-		&cli.StringFlag{Name: nameFlag, Value: "example"},
-		&cli.StringFlag{Name: idFlag, Value: "example-id"},
-		&cli.StringFlag{Name: hostFlag, Value: "0.0.0.0"},
-		&cli.IntFlag{Name: portFlag, Value: 8000},
-		&cli.StringFlag{Name: checkHostFlag, Value: "host.docker.internal"},
-	}
-}
-
 func main() {
-	app := cli.NewApp()
-	app.Action = action
-	app.Flags = flags()
+	flag.Parse()
 
-	err := app.Run(os.Args)
-	if err != nil {
+	if err := action(); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func action(ctx *cli.Context) (err error) {
+func action() (err error) {
 	// create the consul client
 	client, err := capi.NewClient(capi.DefaultConfig())
 	if err != nil {
@@ -53,18 +40,18 @@ func action(ctx *cli.Context) (err error) {
 	}
 
 	// register service and service checks
-	err = registerService(ctx, client)
+	err = registerService(client)
 	if err != nil {
 		return err
 	}
 
 	// unregister service and check by service id
 	defer func() {
-		_ = client.Agent().ServiceDeregister(ctx.String(idFlag))
+		//_ = client.Agent().ServiceDeregister(*id)
 	}()
 
 	// graceful shutdown
-	notifyCtx, cancel := signal.NotifyContext(ctx.Context, syscall.SIGINT, syscall.SIGTERM)
+	notifyCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	eg, egx := errgroup.WithContext(notifyCtx)
@@ -75,7 +62,7 @@ func action(ctx *cli.Context) (err error) {
 				return nil
 			case <-time.After(time.Second):
 				// print service statuses every second.
-				err := printInstStatuses(client, ctx.String(nameFlag))
+				err := printInstStatuses(client, *name)
 				if err != nil {
 					return err
 				}
@@ -89,7 +76,7 @@ func action(ctx *cli.Context) (err error) {
 			w.WriteHeader(http.StatusOK)
 		})
 		srv := http.Server{
-			Addr:    fmt.Sprintf("%s:%d", ctx.String(hostFlag), ctx.Int(portFlag)),
+			Addr:    fmt.Sprintf("%s:%d", *host, *port),
 			Handler: mux,
 		}
 
@@ -98,12 +85,12 @@ func action(ctx *cli.Context) (err error) {
 			_ = srv.Shutdown(context.Background())
 		}()
 
-		log.Printf("listen on %s:%d", ctx.String(hostFlag), ctx.Int(portFlag))
+		log.Printf("listen on %s:%d", *host, *port)
 
 		return srv.ListenAndServe()
 	})
 
-	log.Printf("service_id=%s is running", ctx.String(idFlag))
+	log.Printf("service_id=%s is running", *id)
 
 	return eg.Wait()
 }
@@ -125,32 +112,25 @@ func printInstStatuses(client *capi.Client, name string) error {
 	return nil
 }
 
-func registerService(ctx *cli.Context, client *capi.Client) error {
-	id := ctx.String(idFlag)
-	name := ctx.String(nameFlag)
-	host := ctx.String(hostFlag)
-	port := ctx.Int(portFlag)
-
-	fmt.Println(id, name, host, port)
-
+func registerService(client *capi.Client) error {
 	hostname, err := os.Hostname()
 	if err != nil {
-		return err
+		return errors.Wrap(err, "cannot get hostname")
 	}
 
 	err = client.Agent().ServiceRegister(&capi.AgentServiceRegistration{
 		Kind:    capi.ServiceKindTypical,
-		ID:      id,
-		Name:    name,
+		ID:      *id,
+		Name:    *name,
 		Tags:    []string{"sd"},
-		Port:    port,
+		Port:    *port,
 		Address: hostname,
 		Check: &capi.AgentServiceCheck{
-			CheckID:  "check-" + id,
-			Name:     "example-check",
+			CheckID:  "check-" + *id,
+			Name:     *name + "-check",
 			Interval: "3s",
 			Timeout:  "1s",
-			HTTP:     fmt.Sprintf("http://%s:%d/healthcheck", ctx.String(checkHostFlag), ctx.Int(portFlag)),
+			HTTP:     fmt.Sprintf("http://%s:%d/healthcheck", *checkHost, *port),
 		},
 	})
 	if err != nil {
